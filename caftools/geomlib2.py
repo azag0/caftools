@@ -31,8 +31,18 @@ class Atom:
         self.ghost = ghost
 
     @property
+    def mass(self) -> float:
+        mass: float = specie_data[self.specie]['mass']
+        return mass
+
+    @property
     def number(self) -> int:
         return int(specie_data[self.specie]['number'])
+
+    @property
+    def covalent_radius(self) -> float:
+        r: float = specie_data[self.specie]['covalent radius']
+        return r
 
     def copy(self) -> 'Atom':
         return Atom(self.specie, self.coord, self.ghost)
@@ -55,6 +65,15 @@ class Molecule(Sized, Iterable):
         return [atom.number for atom in self]
 
     @property
+    def mass(self) -> float:
+        return sum(atom.mass for atom in self)
+
+    @property
+    def cms(self) -> np.ndarray:
+        masses = np.array([atom.mass for atom in self])
+        return (masses[:, None]*self.xyz).sum(0)/self.mass
+
+    @property
     def coords(self) -> List[Vec]:
         return [atom.coord for atom in self]
 
@@ -73,6 +92,34 @@ class Molecule(Sized, Iterable):
         return ''.join(
             f'{sp}{n if n > 1 else ""}' for sp, n in sorted(counter.items())
         )
+
+    def bondmatrix(self, scale: float) -> np.ndarray:
+        xyz = self.xyz
+        Rs = np.array([atom.covalent_radius for atom in self])
+        dmatrix = np.sqrt(np.sum((xyz[None, :]-xyz[:, None])**2, 2))
+        thrmatrix = scale*(Rs[None, :]+Rs[:, None])
+        return dmatrix < thrmatrix
+
+    def get_fragments(self, scale: float = 1.3) -> List['Molecule']:
+        bond = self.bondmatrix(scale)
+        ifragments = geomlib.getfragments(bond)
+        fragments = [
+            Molecule([self._atoms[i].copy() for i in fragment])
+            for fragment in ifragments
+        ]
+        return fragments
+
+    def shifted(self, delta: Union[Vec, np.ndarray]) -> 'Molecule':
+        m = self.copy()
+        for atom in m:
+            c = atom.coord
+            atom.coord = (c[0]+delta[0], c[1]+delta[1], c[2]+delta[2])
+        return m
+
+    def __add__(self, other: object) -> 'Molecule':
+        if not isinstance(other, Molecule):
+            return NotImplemented  # type:ignore
+        return Molecule(self._atoms + other._atoms)
 
     @property
     def centers(self) -> Iterator[Atom]:
@@ -127,6 +174,12 @@ class Molecule(Sized, Iterable):
 
     def copy(self) -> 'Molecule':
         return Molecule([atom.copy() for atom in self._atoms])
+
+    def ghost(self) -> 'Molecule':
+        m = self.copy()
+        for atom in m:
+            atom.ghost = True
+        return m
 
     def write(self, filename: str) -> None:
         ext = os.path.splitext(filename)[1]

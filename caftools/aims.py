@@ -7,9 +7,9 @@ from ..Logging import info, report
 from pathlib import Path
 import shutil
 
-from typing import Callable, Dict, Tuple, Any
+from typing import Callable, Dict, Tuple, Any, List
 from . import geomlib2  # noqa
-from ..Configure import Contents
+from ..Configure import Contents, Context
 
 _reported: Dict[str, Tuple[Callable[[str], None], str]] = {}
 
@@ -20,7 +20,7 @@ def reporter() -> None:
         printer(msg)
 
 
-species_db: Dict[Tuple[str, str], str] = {}
+species_db: Dict[Tuple[Path, str], str] = {}
 aims_paths: Dict[str, Path] = {}
 
 
@@ -51,14 +51,30 @@ class AimsTask(Task):
             geom: geomlib2.Molecule,
             tags: Dict[str, Any],
             check: bool = True,
+            ctx: Context,
             **kwargs: Any
     ) -> None:
+        command, aims_path = self.get_aims(aims=aims, check=check, **kwargs)
+        lines = self.get_base_control(tags=tags, **kwargs)
+        basis_root = aims_path.parents[1]/'aimsfiles/species_defaults'/basis
+        for basis_def in self.get_basis(root=basis_root, geom=geom, **kwargs):
+            lines.extend(['', basis_def])
+        inputs = [
+            ('geometry.in', Contents(geom.dumps('aims'))),
+            ('control.in', Contents('\n'.join(lines)))
+        ]
+        super().__init__(command=command, inputs=inputs, ctx=ctx)
+
+    def get_aims(self, *, aims: str, check: bool, **kwargs: Any) -> Tuple[str, Path]:
         aims_path = get_aims_path(aims)
         command = f'AIMS={aims} run_aims'
         if check:
             command += ' && grep "Have a nice day" run.out >/dev/null'
         if aims not in _reported:
             _reported[aims] = (info, f'{aims} is {aims_path}')
+        return command, aims_path
+
+    def get_base_control(self, *, tags: Dict[str, Any], **kwargs: Any) -> List[str]:
         lines = []
         for tag, value in tags.items():
             if value is None:
@@ -71,18 +87,17 @@ class AimsTask(Task):
                 if value == 'xc' and value.startswith('libxc'):
                     lines.append('override_warning_libxc')
                 lines.append(f'{tag}  {p2f(value)}')
-        basis_root = aims_path.parents[1]/'aimsfiles/species_defaults'/basis
-        species = set(zip(geom.numbers, geom.species))
+        return lines
+
+    def get_basis(self, *, root: Path, geom: geomlib2.Molecule, **kwargs: Any) -> List[str]:
+        species = set([(a.number, a.specie) for a in geom.centers])
+        basis_defs = []
         for number, specie in sorted(species):
-            if (basis, specie) not in species_db:
-                with (basis_root/f'{number:02d}_{specie}_default').open() as f:
+            if (root, specie) not in species_db:
+                with (root/f'{number:02d}_{specie}_default').open() as f:
                     basis_def = f.read()
-                species_db[basis, specie] = basis_def
+                species_db[root, specie] = basis_def
             else:
-                basis_def = species_db[basis, specie]
-            lines.extend(['', basis_def])
-        inputs = [
-            ('geometry.in', Contents(geom.dumps('aims'))),
-            ('control.in', Contents('\n'.join(lines)))
-        ]
-        super().__init__(command=command, inputs=inputs, **kwargs)
+                basis_def = species_db[root, specie]
+            basis_defs.append(basis_def)
+        return basis_defs
