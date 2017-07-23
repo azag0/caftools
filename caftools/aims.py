@@ -2,79 +2,47 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 from .convert import p2f
-from ..Configure import Task
-from ..Logging import info, report
 from pathlib import Path
 import shutil
 
-from typing import Callable, Dict, Tuple, Any, List
+from typing import Dict, Any, List, Tuple, Callable  # noqa
+from mypy_extensions import KwArg  # noqa
 from . import geomlib2  # noqa
-from ..Configure import Contents, Context
-
-_reported: Dict[str, Tuple[Callable[[str], None], str]] = {}
-
-
-@report
-def reporter() -> None:
-    for printer, msg in _reported.values():
-        printer(msg)
-
-
-species_db: Dict[Tuple[Path, str], str] = {}
-aims_paths: Dict[str, Path] = {}
 
 
 class AimsNotFound(Exception):
     pass
 
 
-def get_aims_path(aims: str) -> Path:
-    if aims in aims_paths:
-        return aims_paths[aims]
-    aims_full = shutil.which(aims)
-    if not aims_full:
-        raise AimsNotFound(aims)
-    path = Path(aims_full).resolve()
-    aims_paths[aims] = path
-    return path
+class AimsTask:
+    default_features = ['speciedir', 'tags', 'command', 'basis', 'geom', 'core']
 
-
-def delink_aims(aims: str) -> str:
-    return get_aims_path(aims).name
-
-
-class AimsTask(Task):
-    def __init__(
-            self, *,
-            aims: str,
-            basis: str,
-            geom: geomlib2.Molecule,
-            tags: Dict[str, Any],
-            check: bool = True,
-            ctx: Context,
-            **kwargs: Any
-    ) -> None:
-        command, aims_path = self.get_aims(aims=aims, check=check, **kwargs)
-        lines = self.get_base_control(tags=tags, **kwargs)
-        basis_root = aims_path.parents[1]/'aimsfiles/species_defaults'/basis
-        for basis_def in self.get_basis(root=basis_root, geom=geom, **kwargs):
-            lines.extend(['', basis_def])
-        inputs = [
-            ('geometry.in', Contents(geom.dumps('aims'))),
-            ('control.in', Contents('\n'.join(lines)))
+    def __init__(self, features: List[str] = None) -> None:
+        self.basis_defs: Dict[Tuple[Path, str], str] = {}
+        self.speciedirs: Dict[Tuple[str, str], Path] = {}
+        self.features: List[Callable[[KwArg(Any)], Dict[str, Any]]] = [
+            getattr(self, feat) for feat in features or self.default_features
         ]
-        super().__init__(command=command, inputs=inputs, ctx=ctx)
 
-    def get_aims(self, *, aims: str, check: bool, **kwargs: Any) -> Tuple[str, Path]:
-        aims_path = get_aims_path(aims)
-        command = f'AIMS={aims} run_aims'
-        if check:
-            command += ' && grep "Have a nice day" run.out >/dev/null'
-        if aims not in _reported:
-            _reported[aims] = (info, f'{aims} is {aims_path}')
-        return command, aims_path
+    def __call__(self, **kwargs: Any) -> Dict[str, Any]:
+        for feature in self.features:
+            kwargs = feature(**kwargs)
+        return kwargs
 
-    def get_base_control(self, *, tags: Dict[str, Any], **kwargs: Any) -> List[str]:
+    def speciedir(self, *, aims: str, basis: str, **kwargs: Any) -> Dict[str, Any]:
+        basis_key = aims, basis
+        if basis_key in self.speciedirs:
+            speciedir = self.speciedirs[basis_key]
+        else:
+            pathname = shutil.which(aims)
+            if not pathname:
+                raise AimsNotFound(aims)
+            path = Path(pathname)
+            speciedir = path.parents[1]/'aimsfiles/species_defaults'/basis
+            self.speciedirs[basis_key] = speciedir
+        return dict(**kwargs, aims=aims, speciedir=speciedir)
+
+    def tags(self, tags: Dict[str, Any], **kwargs: Any) -> Dict[str, Any]:
         lines = []
         for tag, value in tags.items():
             if value is None:
@@ -87,17 +55,36 @@ class AimsTask(Task):
                 if value == 'xc' and value.startswith('libxc'):
                     lines.append('override_warning_libxc')
                 lines.append(f'{tag}  {p2f(value)}')
-        return lines
+        control = '\n'.join(lines)
+        return dict(**kwargs, control=control)
 
-    def get_basis(self, *, root: Path, geom: geomlib2.Molecule, **kwargs: Any) -> List[str]:
+    def command(self, aims: str, check: bool = True,
+                **kwargs: Any) -> Dict[str, Any]:
+        command = f'AIMS={aims} run_aims'
+        if check:
+            command += ' && grep "Have a nice day" run.out >/dev/null'
+        return dict(**kwargs, command=command)
+
+    def basis(self, *, geom: geomlib2.Molecule, speciedir: Path,
+              **kwargs: Any) -> Dict[str, Any]:
         species = set([(a.number, a.specie) for a in geom.centers])
-        basis_defs = []
+        basis = []
         for number, specie in sorted(species):
-            if (root, specie) not in species_db:
-                with (root/f'{number:02d}_{specie}_default').open() as f:
-                    basis_def = f.read()
-                species_db[root, specie] = basis_def
+            if (speciedir, specie) not in self.basis_defs:
+                basis_def = (speciedir/f'{number:02d}_{specie}_default').read_text()
+                self.basis_defs[speciedir, specie] = basis_def
             else:
-                basis_def = species_db[root, specie]
-            basis_defs.append(basis_def)
-        return basis_defs
+                basis_def = self.basis_defs[speciedir, specie]
+            basis.append(basis_def)
+        return dict(**kwargs, geom=geom, basis=basis)
+
+    def geom(self, *, geom: geomlib2.Molecule, **kwargs: Any) -> Dict[str, Any]:
+        return dict(**kwargs, geometry=geom.dumps('aims'))
+
+    def core(self, *, control: str, basis: List[str], geometry: str, inputs: List,
+             **kwargs: Any) -> Dict[str, Any]:
+        control = '\n\n'.join([control, *basis])
+        return dict(**kwargs, inputs=[
+            ('control.in', control),
+            ('geometry.in', geometry),
+        ])
