@@ -90,12 +90,12 @@ class AimsTask:
         ])
 
 
-def _kwid(**kw):
+def _kwid(**kw: Any) -> Dict[str, Any]:
     return kw
 
 
 class AimsWriter:
-    rules = {
+    rules: Dict[str, Callable] = {
         'ROOT': lambda species: species,
         'species': lambda label, basis, angular_grids, valence, ion_occ, **kw: [
             ('species', label), kw, angular_grids, valence, ion_occ, basis
@@ -115,12 +115,11 @@ class AimsWriter:
         ),
     }
 
-    def __init__(self, rules=None, root='ROOT'):
-        self.root = root
+    def __init__(self, rules: Dict[str, Callable] = None) -> None:
         if rules:
             self.rules = rules
 
-    def stringify(self, value):
+    def stringify(self, value: Any) -> str:
         if isinstance(value, bool):
             return f'.{str(value).lower()}.'
         if isinstance(value, tuple):
@@ -134,21 +133,21 @@ class AimsWriter:
             )
         return str(value)
 
-    def _transform_value(self, val, rule):
+    def _transform_value(self, val: Any, rule: str) -> Any:
         if isinstance(val, list):
             return [self._transform_value(x, rule) for x in val]
         if isinstance(val, dict):
             return self.rules.get(rule, _kwid)(**self._transform_node(val))
         return val
 
-    def _transform_node(self, node):
+    def _transform_node(self, node: Any) -> Any:
         if isinstance(node, dict):
             return {k: self._transform_value(v, k) for k, v in node.items()}
         return node
 
-    def transform(self, node):
-        return self._transform_node({self.root: node})[self.root]
+    def transform(self, node: Any, root: str = 'ROOT') -> Any:
+        return self._transform_node({root: node})[root]
 
-    def write(self, node):
-        value = self.transform(node)
+    def write(self, node: Any, root: str = 'ROOT') -> str:
+        value = self.transform(node, root=root)
         return self.stringify(value)
